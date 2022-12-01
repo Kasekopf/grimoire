@@ -42,6 +42,26 @@ interface ArgSpec<T> {
  */
 type ArgSpecNoDefault<T> = Omit<ArgSpec<T>, "default">;
 
+/**
+ * Specification for an argument that takes values in T[].
+ *
+ * Entries are parsed by splitting on the separator and trimming.
+ *
+ * @member separator String to use as the separator between entries. If not
+ *    given, defaults to ",".
+ * @member noTrim If true, do not perform trimming on each entry.
+ * @member default A default value to use if no value is provided.
+ *    Note that 'default' is effectively optional, as all methods that take
+ *    an ArraySpec allow for 'default' to be omitted. But it is typed as
+ *    non-optional here to enable cool type inference voodoo.
+ */
+interface ArraySpec<T> extends ArgSpecNoDefault<T> {
+  separator?: string;
+  noTrim?: boolean;
+  default: T[];
+}
+type ArraySpecNoDefault<T> = Omit<ArraySpec<T>, "default">;
+
 interface ArgOptions {
   defaultGroupName?: string; // Name to use in help text for the top-level group; defaults to "Options".
   positionalArgs?: string[]; // Key names of args that can be passed positionally, without the key being provided at runtime. (Not recommended, but provided for backwards compatability).
@@ -52,10 +72,10 @@ export class Args {
    * Create an argument for a custom type.
    * @param spec Specification for this argument.
    * @param parser A function to parse a string value into the proper type.
-   * @param valueName The name of this type, for the help text.
+   * @param valueHelpName The name of this type, for the help text.
    * @returns An argument.
    */
-  static custom<T>(spec: ArgSpec<T>, parser: Parser<T>, valueName: string): Arg<T>;
+  static custom<T>(spec: ArgSpec<T>, parser: Parser<T>, valueHelpName: string): Arg<T>;
   static custom<T>(
     spec: ArgSpecNoDefault<T>,
     parser: Parser<T>,
@@ -66,8 +86,11 @@ export class Args {
     parser: Parser<T>,
     valueHelpName: string
   ): Arg<T> | ArgNoDefault<T> {
-    if ("default" in spec && spec.options) {
-      if (!spec.options.map((option) => option[0]).includes(spec.default)) {
+    const raw_options = spec.options?.map((option) => option[0]);
+
+    // Check that the default value actually appears in the options.
+    if ("default" in spec && raw_options) {
+      if (!raw_options.includes(spec.default)) {
         throw `Invalid default value ${spec.default}`;
       }
     }
@@ -75,7 +98,81 @@ export class Args {
     return {
       ...spec,
       valueHelpName: valueHelpName,
-      parser: parser,
+      parser: (value: string): T | ParseError | undefined => {
+        const parsed_value = parser(value);
+
+        if (parsed_value === undefined || parsed_value instanceof ParseError) return parsed_value;
+        if (raw_options) {
+          if (!raw_options.includes(parsed_value)) {
+            return new ParseError(`received ${value} which was not in the allowed options.`);
+          }
+        }
+        return parsed_value;
+      },
+      options: spec.options?.map((a) => [`${a[0]}`, a[1]]),
+    };
+  }
+
+  /**
+   * Create an array argument for a given type.
+   * @param spec Specification for this argument.
+   * @param argFromSpec A function to create a non-array version of this arg.
+   * @returns An argument.
+   */
+  private static arrayFromArg<T>(
+    spec: ArraySpecNoDefault<T>,
+    argFromSpec: (spec: ArgSpecNoDefault<T>) => ArgNoDefault<T>
+  ): ArgNoDefault<T[]>;
+  private static arrayFromArg<T>(
+    spec: ArraySpec<T>,
+    argFromSpec: (spec: ArgSpecNoDefault<T>) => ArgNoDefault<T>
+  ): Arg<T[]>;
+  private static arrayFromArg<T>(
+    spec: ArraySpec<T> | ArraySpecNoDefault<T>,
+    argFromSpec: (spec: ArgSpecNoDefault<T>) => ArgNoDefault<T>
+  ): Arg<T[]> | ArgNoDefault<T[]> {
+    // First, construct a non-array version of this argument.
+    // We do this by calling argFromSpec in order to extract the parser and
+    // valueHelpName (to make it easier to define the functions below).
+    //
+    // The default argument of an ArraySpec is of type T[], which causes
+    // problems, so we must remove it.
+    const spec_without_default = { ...spec } as any; // Avoid "the operand of a 'delete' operator must be optional"
+    if ("default" in spec_without_default) delete spec_without_default["default"];
+    const arg = argFromSpec(spec_without_default);
+
+    // Next, check that all default values actually appear in the options.
+    const raw_options = spec.options?.map((option) => option[0]);
+    if ("default" in spec && raw_options) {
+      for (const default_entry of spec.default) {
+        if (!raw_options.includes(default_entry)) throw `Invalid default value ${spec.default}`;
+      }
+    }
+
+    const arrayParser = (value: string): T[] | ParseError | undefined => {
+      // Split the array
+      let values = value.split(spec.separator ?? ",");
+      if (!spec.noTrim) values = values.map((v) => v.trim());
+
+      // Parse all values, return the first error found if any
+      const result = values.map((v) => arg.parser(v));
+      const error = result.find((v) => v instanceof ParseError);
+      if (error) return error as ParseError;
+      const failure_index = result.indexOf(undefined);
+      if (failure_index !== -1)
+        return new ParseError(
+          `components expected ${arg.parser.name}$ but could not parse ${values[failure_index]}`
+        );
+
+      // Otherwise, all values are good
+      return result as T[];
+    };
+
+    return {
+      ...spec,
+      valueHelpName: arg.valueHelpName,
+      parser: arrayParser,
+      options: spec.options?.map((a) => [`${a[0]}`, a[1]]),
     };
   }
 
@@ -90,6 +187,16 @@ export class Args {
   }
 
   /**
+   * Create a string[] argument.
+   * @param spec Specification for this argument. See {@link ArraySpec} for details.
+   */
+  static strings(spec: ArraySpec<string>): Arg<string[]>;
+  static strings(spec: ArraySpecNoDefault<string>): ArgNoDefault<string[]>;
+  static strings(spec: ArraySpecNoDefault<string>): ArgNoDefault<string[]> {
+    return this.arrayFromArg(spec, this.string);
+  }
+
+  /**
    * Create a number argument.
    * @param spec Specification for this argument. See {@link ArgSpec} for details.
    */
@@ -101,6 +208,16 @@ export class Args {
       (value: string) => (isNaN(Number(value)) ? undefined : Number(value)),
       "NUMBER"
     );
+  }
+
+  /**
+   * Create a number[] argument.
+   * @param spec Specification for this argument. See {@link ArraySpec} for details.
+   */
+  static numbers(spec: ArraySpec<number>): Arg<number[]>;
+  static numbers(spec: ArraySpecNoDefault<number>): ArgNoDefault<number[]>;
+  static numbers(spec: ArraySpecNoDefault<number>): ArgNoDefault<number[]> {
+    return this.arrayFromArg(spec, this.number);
   }
 
   /**
@@ -119,6 +236,16 @@ export class Args {
       },
       "BOOLEAN"
     );
+  }
+
+  /**
+   * Create a boolean[] argument.
+   * @param spec Specification for this argument. See {@link ArraySpec} for details.
+   */
+  static booleans(spec: ArraySpec<boolean>): Arg<boolean[]>;
+  static booleans(spec: ArraySpecNoDefault<boolean>): ArgNoDefault<boolean[]>;
+  static booleans(spec: ArraySpecNoDefault<boolean>): ArgNoDefault<boolean[]> {
+    return this.arrayFromArg(spec, this.boolean);
   }
 
   /**
@@ -162,6 +289,16 @@ export class Args {
   }
 
   /**
+   * Create a Class[] argument.
+   * @param spec Specification for this argument. See {@link ArraySpec} for details.
+   */
+  static classes(spec: ArraySpec<Class>): Arg<Class[]>;
+  static classes(spec: ArraySpecNoDefault<Class>): ArgNoDefault<Class[]>;
+  static classes(spec: ArraySpecNoDefault<Class>): ArgNoDefault<Class[]> {
+    return this.arrayFromArg(spec, this.class);
+  }
+
+  /**
    * Create an effect argument.
    * @param spec Specification for this argument. See {@link ArgSpec} for details.
    */
@@ -169,6 +306,16 @@ export class Args {
   static effect(spec: ArgSpecNoDefault<Effect>): ArgNoDefault<Effect>;
   static effect(spec: ArgSpecNoDefault<Effect>): ArgNoDefault<Effect> {
     return this.custom(spec, Effect.get, "EFFECT");
+  }
+
+  /**
+   * Create a Effect[] argument.
+   * @param spec Specification for this argument. See {@link ArraySpec} for details.
+   */
+  static effects(spec: ArraySpec<Effect>): Arg<Effect[]>;
+  static effects(spec: ArraySpecNoDefault<Effect>): ArgNoDefault<Effect[]>;
+  static effects(spec: ArraySpecNoDefault<Effect>): ArgNoDefault<Effect[]> {
+    return this.arrayFromArg(spec, this.effect);
   }
 
   /**
@@ -182,6 +329,16 @@ export class Args {
   }
 
   /**
+   * Create a Familiar[] argument.
+   * @param spec Specification for this argument. See {@link ArraySpec} for details.
+   */
+  static familiars(spec: ArraySpec<Familiar>): Arg<Familiar[]>;
+  static familiars(spec: ArraySpecNoDefault<Familiar>): ArgNoDefault<Familiar[]>;
+  static familiars(spec: ArraySpecNoDefault<Familiar>): ArgNoDefault<Familiar[]> {
+    return this.arrayFromArg(spec, this.familiar);
+  }
+
+  /**
    * Create an item argument.
    * @param spec Specification for this argument. See {@link ArgSpec} for details.
    */
@@ -189,6 +346,16 @@ export class Args {
   static item(spec: ArgSpecNoDefault<Item>): ArgNoDefault<Item>;
   static item(spec: ArgSpecNoDefault<Item>): ArgNoDefault<Item> {
     return this.custom(spec, Item.get, "ITEM");
+  }
+
+  /**
+   * Create a Item[] argument.
+   * @param spec Specification for this argument. See {@link ArraySpec} for details.
+   */
+  static items(spec: ArraySpec<Item>): Arg<Item[]>;
+  static items(spec: ArraySpecNoDefault<Item>): ArgNoDefault<Item[]>;
+  static items(spec: ArraySpecNoDefault<Item>): ArgNoDefault<Item[]> {
+    return this.arrayFromArg(spec, this.item);
   }
 
   /**
@@ -202,6 +369,16 @@ export class Args {
   }
 
   /**
+   * Create a Location[] argument.
+   * @param spec Specification for this argument. See {@link ArraySpec} for details.
+   */
+  static locations(spec: ArraySpec<Location>): Arg<Location[]>;
+  static locations(spec: ArraySpecNoDefault<Location>): ArgNoDefault<Location[]>;
+  static locations(spec: ArraySpecNoDefault<Location>): ArgNoDefault<Location[]> {
+    return this.arrayFromArg(spec, this.location);
+  }
+
+  /**
    * Create a monster argument.
    * @param spec Specification for this argument. See {@link ArgSpec} for details.
    */
@@ -209,6 +386,16 @@ export class Args {
   static monster(spec: ArgSpecNoDefault<Monster>): ArgNoDefault<Monster>;
   static monster(spec: ArgSpecNoDefault<Monster>): ArgNoDefault<Monster> {
     return this.custom(spec, Monster.get, "MONSTER");
+  }
+
+  /**
+   * Create a Monster[] argument.
+   * @param spec Specification for this argument. See {@link ArraySpec} for details.
+   */
+  static monsters(spec: ArraySpec<Monster>): Arg<Monster[]>;
+  static monsters(spec: ArraySpecNoDefault<Monster>): ArgNoDefault<Monster[]>;
+  static monsters(spec: ArraySpecNoDefault<Monster>): ArgNoDefault<Monster[]> {
+    return this.arrayFromArg(spec, this.monster);
   }
 
   /**
@@ -222,6 +409,16 @@ export class Args {
   }
 
   /**
+   * Create a Path[] argument.
+   * @param spec Specification for this argument. See {@link ArraySpec} for details.
+   */
+  static paths(spec: ArraySpec<Path>): Arg<Path[]>;
+  static paths(spec: ArraySpecNoDefault<Path>): ArgNoDefault<Path[]>;
+  static paths(spec: ArraySpecNoDefault<Path>): ArgNoDefault<Path[]> {
+    return this.arrayFromArg(spec, this.path);
+  }
+
+  /**
    * Create a skill argument.
    * @param spec Specification for this argument. See {@link ArgSpec} for details.
    */
@@ -229,6 +426,16 @@ export class Args {
   static skill(spec: ArgSpecNoDefault<Skill>): ArgNoDefault<Skill>;
   static skill(spec: ArgSpecNoDefault<Skill>): ArgNoDefault<Skill> {
     return this.custom(spec, Skill.get, "SKILL");
+  }
+
+  /**
+   * Create a Skill[] argument.
+   * @param spec Specification for this argument. See {@link ArraySpec} for details.
+   */
+  static skills(spec: ArraySpec<Skill>): Arg<Skill[]>;
+  static skills(spec: ArraySpecNoDefault<Skill>): ArgNoDefault<Skill[]>;
+  static skills(spec: ArraySpecNoDefault<Skill>): ArgNoDefault<Skill[]> {
+    return this.arrayFromArg(spec, this.skill);
   }
 
   /**
@@ -441,20 +648,36 @@ type ArgGroup<T extends ArgMap> = {
   args: T;
 };
 
+export class ParseError {
+  message: string;
+
+  constructor(message: string) {
+    this.message = message;
+  }
+}
+
 /**
  * A parser that can transform a string value into the desired type.
  * It may return undefined if given an invalid value.
  */
-type Parser<T> = (value: string) => T | undefined;
+type Parser<T> = (value: string) => T | ParseError | undefined;
 
 /**
  * An argument that takes values in T.
  * @member parser The parser to use to built T values.
  * @member valueHelpName The string name of T, e.g. NUMBER.
  */
-interface Arg<T> extends ArgSpec<T> {
+interface Arg<T> {
+  // From ArgSpec
+  key?: Exclude<string, "help">;
+  help?: string;
+  setting?: string;
+  hidden?: boolean;
+  default: T;
+
   parser: Parser<T>;
   valueHelpName: string;
+  options?: [string, string?][];
 }
 /**
  * Allow the default argument to be optional, in a way that allows for cool type inference.
@@ -497,9 +720,9 @@ type ParsedGroup<T extends ArgMap> = {
   [k in keyof T]: T[k] extends ArgGroup<any>
     ? ParsedGroup<T[k]["args"]>
     : T[k] extends Arg<unknown>
-    ? Exclude<ReturnType<T[k]["parser"]>, undefined>
+    ? Exclude<ReturnType<T[k]["parser"]>, undefined | ParseError>
     : T[k] extends ArgNoDefault<unknown>
-    ? ReturnType<T[k]["parser"]>
+    ? Exclude<ReturnType<T[k]["parser"]>, ParseError>
     : never;
 };
 type ParsedArgs<T extends ArgMap> = ParsedGroup<T> & ArgMetadata<T>;
@@ -520,13 +743,8 @@ function parseAndValidate<T>(arg: Arg<T> | ArgNoDefault<T>, source: string, valu
   }
 
   if (parsed_value === undefined)
-    throw `${source} expected ${arg.parser.name}$ but could not parse value: ${value}`;
-  const options = arg.options;
-  if (options) {
-    if (!options.map((option) => option[0]).includes(parsed_value)) {
-      throw `${source} received invalid value: ${value}`;
-    }
-  }
+    throw `${source} expected ${arg.parser.name}$ but could not parse ${value}`;
+  if (parsed_value instanceof ParseError) throw `${source} ${parsed_value.message}`;
   return parsed_value;
 }
 
