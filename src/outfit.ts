@@ -466,6 +466,39 @@ export class Outfit {
   }
 
   /**
+   * Add a rider to the outfit.
+   *
+   * This function does *not* equip the corresponding item; it must be equipped separately.
+   *
+   * If a familiar is already specified as the rider that is different from the provided target, this function will return false and not change the rider.
+   * @param target The familiar to use as the rider, or a ranked list of familiars to try to use as the rider.
+   * @returns True if we successfully set the slot to a valid rider.
+   */
+  private equipRider(target: Familiar | Familiar[], slot: Slot): boolean {
+    const current = this.riders.get(slot);
+    const targets = Array.isArray(target) ? target : [target];
+
+    if (current) {
+      return targets.includes(current);
+    }
+
+    // Gather the set of riders that are equipped in other rider slots.
+    const other_riders: Familiar[] = [];
+    for (const other_rider_slot of this.riders.keys()) {
+      if (other_rider_slot === slot) continue;
+      const other_rider = this.riders.get(other_rider_slot);
+      if (other_rider) other_riders.push(other_rider);
+    }
+
+    const fam = targets.find((f) => have(f) && this.familiar !== f && !other_riders.includes(f));
+    if (fam) {
+      this.riders.set(slot, fam);
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Add a bjornified familiar to the outfit.
    *
    * This function does *not* equip the buddy bjorn itself; it must be equipped separately.
@@ -475,38 +508,7 @@ export class Outfit {
    * @returns True if we successfully set the bjorn to a valid target.
    */
   bjornify(target: Familiar | Familiar[]): boolean {
-    const current = this.riders.get($slot`buddy-bjorn`);
-    if (current) {
-      if (
-        Array.isArray(target)
-          ? (target as (Familiar | undefined)[]).includes(current)
-          : current === target
-      ) {
-        return true;
-      }
-      return false;
-    }
-
-    if (Array.isArray(target)) {
-      const fam = target.find(
-        (f) => have(f) && this.familiar !== f && this.riders.get($slot`crown-of-thrones`) !== f
-      );
-      if (fam) {
-        this.riders.set($slot`buddy-bjorn`, fam);
-        return true;
-      }
-      return false;
-    } else {
-      if (
-        have(target) &&
-        this.familiar !== target &&
-        !Array.from(this.riders.values()).includes(target)
-      ) {
-        this.riders.set($slot`buddy-bjorn`, target);
-        return true;
-      }
-      return false;
-    }
+    return this.equipRider(target, $slot`buddy-bjorn`) === true;
   }
 
   /**
@@ -519,40 +521,8 @@ export class Outfit {
    * @returns True if we successfully set the enthrone to a valid target.
    */
   enthrone(target: Familiar | Familiar[]): boolean {
-    const current = this.riders.get($slot`crown-of-thrones`);
-    if (current) {
-      if (
-        Array.isArray(target)
-          ? (target as (Familiar | undefined)[]).includes(current)
-          : current === target
-      ) {
-        return true;
-      }
-      return false;
-    }
-
-    if (Array.isArray(target)) {
-      const fam = target.find(
-        (f) => have(f) && this.familiar !== f && this.riders.get($slot`buddy-bjorn`) !== f
-      );
-      if (fam) {
-        this.riders.set($slot`crown-of-thrones`, fam);
-        return true;
-      }
-      return false;
-    } else {
-      if (
-        have(target) &&
-        this.familiar !== target &&
-        !Array.from(this.riders.values()).includes(target)
-      ) {
-        this.riders.set($slot`crown-of-thrones`, target);
-        return true;
-      }
-      return false;
-    }
+    return this.equipRider(target, $slot`crown-of-thrones`) === true;
   }
-
   /**
    * Set the provided modes for items that may be equipped in the outfit.
    *
